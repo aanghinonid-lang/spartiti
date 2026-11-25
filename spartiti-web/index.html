@@ -1,5 +1,6 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <title>Spartiti</title>
+<script src="config.js"></script>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#111111">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -50,6 +51,7 @@ h1{margin:0; font-family:var(--f-display); font-weight:600; font-size:40px; line
 .card .t{font-family:var(--f-display); font-weight:600; font-size:22px; line-height:1.1; overflow-wrap:anywhere}
 .card .m{font-size:12.5px; color:var(--muted); margin-top:4px}
 .card .acts{display:flex; gap:8px; flex-wrap:wrap}
+.syncrow{display:flex; align-items:center; justify-content:space-between; gap:12px; background:var(--paper); border:1px solid var(--line); border-radius:14px; padding:10px 14px; font-size:13px; color:var(--muted)}.syncrow b{color:var(--ink)}
 .backup{display:flex; gap:10px; justify-content:center; flex-wrap:wrap; margin-top:8px}.backup button{font-size:13px; color:var(--muted)}
 .empty{background:var(--paper); border:1px dashed var(--line); border-radius:16px; padding:28px; color:var(--muted); font-size:14px; line-height:1.6; text-align:center}
 .fab{position:fixed; left:50%; transform:translateX(-50%); bottom:max(20px, env(safe-area-inset-bottom,0px)); height:56px; border-radius:28px; padding:0 26px; font-size:16px; font-weight:500; box-shadow:0 6px 24px rgba(17,17,17,.18)}
@@ -143,6 +145,7 @@ select.dynsel{font:italic 600 17px/1 "Cormorant Garamond", Georgia, serif; min-h
   <input id="search" type="search" placeholder="Cerca un brano" aria-label="Cerca un brano">
   <div id="cards" class="cards"></div>
   <div id="lib-empty" class="empty" hidden>Non c'è ancora nessuno spartito.<br>Tocca <b>Nuovo spartito</b>, scegli chiave, tonalità e tempo, poi scrivi con l'Apple Pencil.</div>
+  <div id="sync-row" class="syncrow" hidden><span id="sync-txt"></span><button id="sync-btn"></button></div>
   <div class="backup"><button id="bk-out">Esporta backup</button><button id="bk-in">Importa backup</button><input id="bk-file" type="file" accept=".json,application/json" hidden></div>
   <button id="new" class="dark fab"><span class="plus">+</span>Nuovo spartito</button>
 </div>
@@ -200,6 +203,22 @@ select.dynsel{font:italic 600 17px/1 "Cormorant Garamond", Georgia, serif; min-h
   </div>
 </div>
 
+<div id="m-sync" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="sync-h">
+  <div class="sheetbox">
+    <h2 id="sync-h">Sincronizza i tuoi spartiti</h2>
+    <p style="margin:0;color:var(--muted);font-size:14px;line-height:1.5">Usa la stessa email e password sul PC e sull'iPad: i brani saranno uguali dappertutto.</p>
+    <div class="field"><span class="label">EMAIL</span><input id="s-mail" type="email" autocomplete="username" placeholder="la tua email"></div>
+    <div class="field"><span class="label">PASSWORD</span><input id="s-pass" type="password" autocomplete="current-password" placeholder="almeno 6 caratteri"></div>
+    <p id="s-msg" style="margin:0;min-height:18px;font-size:13px;color:#9a2b2b"></p>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <button id="s-login" class="dark">Accedi</button>
+      <button id="s-new">Crea account</button>
+      <button id="s-forgot">Password dimenticata</button>
+      <span style="flex:1"></span>
+      <button id="s-close">Chiudi</button>
+    </div>
+  </div>
+</div>
 <div id="m-set" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="set-h">
   <div class="sheetbox">
     <h2 id="set-h">Nuovo spartito</h2>
@@ -2208,6 +2227,80 @@ $('x-xml').onclick = async () => {
   $('x-msg').textContent = r === 'ok' ? 'MusicXML pronto: apri lo .zip in File, poi il file .musicxml in MuseScore o Finale.' : r === 'declined' ? 'Download annullato.' : 'Non riesco a salvare il file da qui.';
 };
 
+
+// ---------- Sync between devices (Firebase: account + cloud database) ----------
+const sync = { fb: null, user: null, local: null };
+const FBV = '10.12.2';
+function syncUi() {
+  const row = $('sync-row'); if (!window.SPARTITI_FIREBASE) { row.hidden = true; return; }
+  row.hidden = false;
+  if (sync.user) { $('sync-txt').innerHTML = 'Sincronizzato come <b>' + esc(sync.user.email || '') + '</b>'; $('sync-btn').textContent = 'Esci'; }
+  else { $('sync-txt').textContent = 'I brani sono solo su questo dispositivo.'; $('sync-btn').textContent = 'Accedi per sincronizzare'; }
+}
+function cloudCol(name) {
+  const F = sync.fb, base = () => F.collection(F.db, 'utenti', sync.user.uid, name);
+  return {
+    async get() { const q = await F.getDocs(base()); return { docs: q.docs.map(d => ({ id: d.id, exists: true, data: () => d.data() })) }; },
+    async add(data) { const r = await F.addDoc(base(), data); return { id: r.id }; },
+    doc(id) { const ref = () => F.doc(base(), id); return { set: data => F.setDoc(ref(), data), delete: () => F.deleteDoc(ref()), update: part => F.setDoc(ref(), part, { merge: true }) }; }
+  };
+}
+async function syncStart() {
+  const cfg = window.SPARTITI_FIREBASE; if (!cfg) return;
+  try {
+    const u = 'https://www.gstatic.com/firebasejs/' + FBV + '/';
+    const [A, AU, FS] = await Promise.all([import(u + 'firebase-app.js'), import(u + 'firebase-auth.js'), import(u + 'firebase-firestore.js')]);
+    const app = A.initializeApp(cfg);
+    let db; try { db = FS.initializeFirestore(app, { localCache: FS.persistentLocalCache({ tabManager: FS.persistentMultipleTabManager() }) }); } catch (e) { db = FS.getFirestore(app); }
+    const auth = AU.getAuth(app);
+    sync.fb = Object.assign({ db, auth }, AU, FS);
+    sync.local = { col: store.col, learn: store.learn, mem: store.mem };
+    AU.onAuthStateChanged(auth, async user => {
+      sync.user = user || null;
+      if (user) {
+        store.col = cloudCol('brani');
+        await syncMergeLocal();
+      } else { store.col = sync.local.col; store.mem = sync.local.mem; }
+      syncUi();
+      if (!$('v-lib').hidden) showLibrary();
+    });
+  } catch (e) { $('sync-row').hidden = false; $('sync-txt').textContent = 'Sincronizzazione non disponibile (serve internet).'; $('sync-btn').hidden = true; }
+}
+// pieces written on this device before logging in are copied to the account once
+async function syncMergeLocal() {
+  const flag = 'spartiti:unito:' + sync.user.uid;
+  try { if (localStorage.getItem(flag)) return; } catch (e) {}
+  try {
+    const L = sync.local; let mine = [];
+    if (L.col) mine = (await L.col.get()).docs.map(d => Object.assign({ id: d.id }, d.data()));
+    else mine = Object.keys(L.mem || {}).map(id => Object.assign({ id }, L.mem[id]));
+    const have = new Set((await store.list()).map(d => (d.titolo || '') + '|' + (d.creato || '')));
+    let n = 0;
+    for (const d of mine) { const k = (d.titolo || '') + '|' + (d.creato || ''); if (have.has(k)) continue; const o = Object.assign({}, d); delete o.id; await store.col.add(o); n++; }
+    localStorage.setItem(flag, '1');
+    if (n) toast('Ho copiato ' + n + ' brani di questo dispositivo nel tuo account');
+  } catch (e) { toast('Non sono riuscito a copiare i brani di questo dispositivo'); }
+}
+const AUTHMSG = { 'auth/invalid-email': 'Email non valida.', 'auth/missing-password': 'Scrivi la password.', 'auth/weak-password': 'La password deve avere almeno 6 caratteri.', 'auth/email-already-in-use': 'Esiste già un account con questa email: usa Accedi.', 'auth/invalid-credential': 'Email o password sbagliate.', 'auth/wrong-password': 'Password sbagliata.', 'auth/user-not-found': 'Nessun account con questa email: usa Crea account.', 'auth/too-many-requests': 'Troppi tentativi, riprova tra qualche minuto.', 'auth/network-request-failed': 'Serve la connessione a internet.' };
+async function syncAuth(kind) {
+  const F = sync.fb; if (!F) { $('s-msg').textContent = 'Sincronizzazione non disponibile, controlla internet.'; return; }
+  const mail = $('s-mail').value.trim(), pass = $('s-pass').value;
+  $('s-msg').textContent = '';
+  try {
+    if (kind === 'new') await F.createUserWithEmailAndPassword(F.auth, mail, pass);
+    else if (kind === 'forgot') { await F.sendPasswordResetEmail(F.auth, mail); $('s-msg').textContent = 'Ti ho mandato una email per cambiare la password.'; return; }
+    else await F.signInWithEmailAndPassword(F.auth, mail, pass);
+    $('m-sync').hidden = true; $('s-pass').value = '';
+    toast(kind === 'new' ? 'Account creato: i brani ora si sincronizzano' : 'Accesso fatto: i brani ora si sincronizzano');
+  } catch (e) { $('s-msg').textContent = AUTHMSG[e && e.code] || ('Non riuscito: ' + ((e && e.code) || e)); }
+}
+$('sync-btn').onclick = () => { if (sync.user) { sync.fb.signOut(sync.fb.auth); toast('Sei uscito: ora vedi i brani di questo dispositivo'); } else { $('s-msg').textContent = ''; $('m-sync').hidden = false; } };
+$('s-login').onclick = () => syncAuth('login');
+$('s-new').onclick = () => syncAuth('new');
+$('s-forgot').onclick = () => syncAuth('forgot');
+$('s-close').onclick = () => { $('m-sync').hidden = true; };
+document.addEventListener('visibilitychange', () => { if (!document.hidden && sync.user && !$('v-lib').hidden) showLibrary(); });
+
 // ---------- Start ----------
 // ---------- Zoom: two fingers pinch (the pen keeps writing) ----------
 function setZoom(z, anchorY) {
@@ -2259,7 +2352,9 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && ed.
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 (async () => {
   await store.init();
+  syncUi();
   await showLibrary();
+  syncStart();
   if (document.fonts) document.fonts.ready.then(() => { if (ed.piece) render(); });
 })();
 window.__app = { get L() { return L; }, ed, store, recognize, recognizeBar, edit, renderTools, openExport, syncExport, xp, buildPdf, buildMusicXml, makeZip, transposePiece, openPiece, render, flush, setMode, select, selectBar, showLibrary, endLasso, buildSeq, barOrder, startPlay, stopPlay, get pl() { return pl; }, get bus() { return [AC, master]; }, get clip() { return clip; } };
